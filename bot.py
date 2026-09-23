@@ -655,18 +655,16 @@ class GuildPlayerView(discord.ui.View):
         super().__init__(timeout=None)
         self.guild = guild
 
-    @discord.ui.button(
-        emoji="🖥️", label="เปิด Dashboard", style=discord.ButtonStyle.primary, row=1
-    )
-    async def dashboard_btn(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        # เช็ค role ตอนกด — DJ ได้ลิงก์แบบมี key (กดได้ทุกปุ่มบนเว็บ)
-        # คนอื่นได้ลิงก์ดูอย่างเดียว (เห็นปุ่มแต่กดไม่ติด ขอเพลงใช้ /play ปกติ)
-        dj = has_dj(interaction)
-        key = await _fetch_dashboard_key(self.guild.id) if dj else None
-        await interaction.response.send_message(
-            _dashboard_messages(self.guild.id, key, dj), ephemeral=True
+        # ปุ่มลิงก์กดทีเดียวเปิดเว็บเลย (เช็ค role ไม่ได้ — เลยเป็นลิงก์ดูอย่างเดียว
+        # ดู+ขอเพลงได้ปกติ / DJ ขอลิงก์คุมเต็มผ่าน /dashboard)
+        self.add_item(
+            discord.ui.Button(
+                emoji="🖥️",
+                label="เปิด Dashboard",
+                style=discord.ButtonStyle.link,
+                url=_dashboard_link(guild.id, None),
+                row=1,
+            )
         )
 
     @discord.ui.button(emoji="⏮", style=discord.ButtonStyle.secondary, row=0)
