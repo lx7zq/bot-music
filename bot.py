@@ -227,6 +227,18 @@ def _expired_msg(paid_until) -> str:
     )
 
 
+def _blocked_msg(sub: dict) -> str | None:
+    """คืน None = เล่นได้ / คืนข้อความ = โดนบล็อก (แยกเคส trial vs หมดแพ็กเกจ)"""
+    if sub.get("paid") or sub.get("in_grace") or sub.get("trial"):
+        return None
+    if sub.get("trial_expired"):
+        return (
+            "˚⋆ หมดช่วงทดลองใช้แล้ว ♡ ต่อแค่ 99฿/เดือนที่ "
+            f"{PRICING_URL} ส่งสลิปหน้าเว็บได้เลย"
+        )
+    return _expired_msg(sub.get("paid_until"))
+
+
 def is_admin(interaction: discord.Interaction) -> bool:
     """เจ้าของดิส / MANAGE_GUILD / ADMINISTRATOR — ไม่มีวันโดนล็อกเอง"""
     if not interaction.guild:
@@ -1084,7 +1096,7 @@ async def _handle_dashboard_cmd(guild: discord.Guild, cmd: str, data: dict):
         query = data.get("query", "")
         if query:
             sub = await _sub_status(guild_id)
-            if not sub.get("paid", True):
+            if not sub.get("ok", True):
                 logger.warning(f"[BILL] guild {guild_id} expired — refuse dashboard add")
                 return
             songs = await fetch_songs(query, limit=1)
@@ -1209,10 +1221,9 @@ async def play(interaction: discord.Interaction, query: str):
         )
 
     sub = await _sub_status(guild.id)
-    if not sub.get("paid", True):
-        return await interaction.followup.send(
-            _expired_msg(sub.get("paid_until")), ephemeral=True
-        )
+    blocked = _blocked_msg(sub)
+    if blocked:
+        return await interaction.followup.send(blocked, ephemeral=True)
 
     _cancel_idle_timer(guild.id)
 
@@ -1679,11 +1690,14 @@ async def _poll_billing():
 @tree.command(name="subscription", description="ดูสถานะแพ็กเกจของเซิร์ฟเวอร์นี้ ♡")
 async def subscription(interaction: discord.Interaction):
     sub = await _sub_status(interaction.guild.id)
-    until = sub.get("paid_until")
-    if sub.get("paid"):
-        msg = f"✅ แพ็กเกจใช้งานได้ถึง **{until or '?'}** ♡"
+    if sub.get("trial"):
+        msg = f"🎁 ช่วงทดลองใช้เหลืออีก **{sub.get('trial_left', '?')} วัน** ♡ ถูกใจค่อยต่อ 99฿/เดือนที่ {PRICING_URL}"
+    elif sub.get("paid"):
+        msg = f"✅ แพ็กเกจใช้งานได้ถึง **{sub.get('paid_until') or '?'}** ♡"
+    elif sub.get("in_grace"):
+        msg = f"⚠️ หมดอายุ {sub.get('paid_until')} แต่ยังฟังได้ช่วงผ่อนผัน รีบต่อที่ {PRICING_URL} นะ ♡"
     else:
-        msg = _expired_msg(until)
+        msg = _blocked_msg(sub) or "❌ แพ็กเกจใช้ไม่ได้"
     await interaction.response.send_message(msg, ephemeral=True)
 
 
