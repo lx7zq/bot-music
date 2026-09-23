@@ -9,6 +9,7 @@ from discord.ext import commands
 from discord import app_commands
 import yt_dlp
 import asyncio
+import io
 import os
 import gc
 import shutil
@@ -174,6 +175,56 @@ TOKEN = os.environ.get("TOKEN")
 # ไม่ต้อง login หน้าเว็บ — เช็ค role ตอนกดในดิส (ephemeral) แล้วแจกลิงก์ ?key= ให้
 DJ_ROLE_NAME = os.environ.get("DJ_ROLE_NAME", "DJ").lower()
 BOT_SECRET = os.environ.get("BOT_SECRET", "change-me-in-prod")
+
+# ── Billing ────────────────────────────────────────────────────────────────
+ADMIN_CHANNEL_ID = int(os.environ.get("ADMIN_DISCORD_CHANNEL_ID", "0") or 0)
+OWNER_DISCORD_ID = int(os.environ.get("OWNER_DISCORD_ID", "0") or 0)
+GRACE_DAYS = int(os.environ.get("BILLING_GRACE_DAYS", "3") or 3)
+PRICING_URL = os.environ.get("PRICING_URL", f"{DASHBOARD_PUBLIC_URL}/pricing")
+INVITE_CLIENT_ID = os.environ.get("INVITE_CLIENT_ID", "1512172686254800986")
+INVITE_PERMS = int(os.environ.get("INVITE_PERMS", "36785152"))  # view+send+embed+history+connect+speak+VAD
+
+
+def invite_url() -> str:
+    return (
+        "https://discord.com/oauth2/authorize"
+        f"?client_id={INVITE_CLIENT_ID}&permissions={INVITE_PERMS}&scope=bot+applications.commands"
+    )
+
+
+def _dashboard_messages(guild_id: int, key: str | None, dj: bool) -> str:
+    """ข้อความแจกลิงก์แบบ masked (ไม่โชว์ key ดิบในห้องแชท)"""
+    link = _dashboard_link(guild_id, key)
+    if dj:
+        return f"[🖥️ เปิด Dashboard (DJ)]({link}) — ลิงก์นี้กดได้ทุกปุ่ม อย่าส่งต่อนะ ♡"
+    return (
+        f"[🖥️ เปิด Dashboard]({link}) — เปิดดูได้เลยนะ ♡ "
+        "ปุ่มคุมเป็นของ DJ อยากขอเพลงใช้ `/play` ในห้องได้ปกติ"
+    )
+
+
+async def _sub_status(guild_id: int) -> dict:
+    """ถาม backend ว่าดิสนี้จ่ายอยู่ไหม — backend ล่ม = ปล่อยผ่าน (fail-open) แล้ว log"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{DASHBOARD_URL}/internal/subscription/{guild_id}",
+                headers={"X-Bot-Secret": BOT_SECRET},
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as r:
+                if r.status == 200:
+                    return await r.json()
+    except Exception as e:
+        logger.warning(f"[BILL] sub check failed (fail-open): {e}")
+    return {"paid": True, "paid_until": None, "offline": True}
+
+
+def _expired_msg(paid_until) -> str:
+    when = f" (หมดอายุ {paid_until})" if paid_until else ""
+    return (
+        f"˚⋆ แพ็กเกจหมดอายุแล้ว{when} ♡ ต่ออายุ 99฿/เดือนที่ {PRICING_URL} "
+        f"แล้วส่งสลิปได้เลย (ใช้ต่อได้อีก {GRACE_DAYS} วันหลังหมดอายุนะ)"
+    )
 
 
 def is_admin(interaction: discord.Interaction) -> bool:
@@ -602,15 +653,9 @@ class GuildPlayerView(discord.ui.View):
         # คนอื่นได้ลิงก์ดูอย่างเดียว (เห็นปุ่มแต่กดไม่ติด ขอเพลงใช้ /play ปกติ)
         dj = has_dj(interaction)
         key = await _fetch_dashboard_key(self.guild.id) if dj else None
-        link = _dashboard_link(self.guild.id, key)
-        if dj:
-            msg = f"🖥️ ลิงก์ Dashboard (DJ) — อย่าส่งต่อนะ ♡\n{link}"
-        else:
-            msg = (
-                "🖥️ เปิดดูได้เลยนะ ♡ ปุ่มคุมเป็นของ DJ — "
-                f"อยากขอเพลงใช้ `/play` ในห้องได้ปกติ\n{link}"
-            )
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.response.send_message(
+            _dashboard_messages(self.guild.id, key, dj), ephemeral=True
+        )
 
     @discord.ui.button(emoji="⏮", style=discord.ButtonStyle.secondary, row=0)
     async def prev_btn(
@@ -1038,6 +1083,10 @@ async def _handle_dashboard_cmd(guild: discord.Guild, cmd: str, data: dict):
     elif cmd == "add_song":
         query = data.get("query", "")
         if query:
+            sub = await _sub_status(guild_id)
+            if not sub.get("paid", True):
+                logger.warning(f"[BILL] guild {guild_id} expired — refuse dashboard add")
+                return
             songs = await fetch_songs(query, limit=1)
             if songs:
                 songs[0]["requester"] = "Dashboard"
@@ -1087,6 +1136,7 @@ async def on_ready():
         logger.warning(f"[READY] Sync failed: {e}")
 
     bot.loop.create_task(_poll_dashboard())
+    bot.loop.create_task(_poll_billing())
 
 
 @bot.event
@@ -1156,6 +1206,12 @@ async def play(interaction: discord.Interaction, query: str):
     if not vc:
         vc = await interaction.user.voice.channel.connect(
             reconnect=True, self_deaf=False, self_mute=False
+        )
+
+    sub = await _sub_status(guild.id)
+    if not sub.get("paid", True):
+        return await interaction.followup.send(
+            _expired_msg(sub.get("paid_until")), ephemeral=True
         )
 
     _cancel_idle_timer(guild.id)
@@ -1453,30 +1509,219 @@ async def volume(interaction: discord.Interaction, vol: int):
 async def dashboard(interaction: discord.Interaction):
     dj = has_dj(interaction)
     key = await _fetch_dashboard_key(interaction.guild.id) if dj else None
-    link = _dashboard_link(interaction.guild.id, key)
-    if dj:
-        msg = f"🖥️ ลิงก์ Dashboard (DJ) — อย่าส่งต่อนะ ♡\n{link}"
-    else:
-        msg = (
-            "🖥️ เปิดดูได้เลยนะ ♡ ปุ่มคุมเป็นของ DJ — "
-            f"อยากขอเพลงใช้ `/play` ในห้องได้ปกติ\n{link}"
-        )
-    await interaction.response.send_message(msg, ephemeral=True)
+    await interaction.response.send_message(
+        _dashboard_messages(interaction.guild.id, key, dj), ephemeral=True
+    )
 
 
 @tree.command(name="dashboard-key", description="รีเซ็ตลิงก์ Dashboard (แอดมินเท่านั้น) ♡")
 async def dashboard_key(interaction: discord.Interaction):
     if not is_admin(interaction):
         return await _deny(interaction, "˚⋆ เฉพาะแอดมินดิสเท่านั้นนะ ♡")
+    await interaction.response.send_message(
+        await _dashboard_key_msg(interaction), ephemeral=True
+    )
+
+
+async def _dashboard_key_msg(interaction: discord.Interaction) -> str:
     key = await _rotate_dashboard_key(interaction.guild.id)
     if not key:
-        return await interaction.response.send_message(
-            "❌ ต่อ backend ไม่ได้ ลองใหม่นะ", ephemeral=True
+        return "❌ ต่อ backend ไม่ได้ ลองใหม่นะ"
+    return f"[🖥️ ลิงก์ Dashboard ใหม่]({_dashboard_link(interaction.guild.id, key)}) — ลิงก์เก่าใช้ไม่ได้แล้วนะ ♡"
+
+
+# ── Billing ────────────────────────────────────────────────────────────────
+
+
+def _is_owner(interaction: discord.Interaction) -> bool:
+    return OWNER_DISCORD_ID and interaction.user.id == OWNER_DISCORD_ID
+
+
+class SlipApproveView(discord.ui.View):
+    """ปุ่ม ✅/❌ ในห้องแอดมิน — กดได้เฉพาะเจ้าของบอท (OWNER_DISCORD_ID)"""
+
+    def __init__(self, pending_id: str, guild_id: int):
+        super().__init__(timeout=None)
+        self.pending_id = pending_id
+        self.guild_id = guild_id
+
+    async def _decide(
+        self, interaction: discord.Interaction, approve: bool
+    ):
+        if not _is_owner(interaction):
+            return await interaction.response.send_message(
+                "˚⋆ เฉพาะเจ้าของบอทนะ ♡", ephemeral=True
+            )
+        action = "approve" if approve else "reject"
+        ok = False
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{DASHBOARD_URL}/internal/billing/{action}",
+                    headers={"X-Bot-Secret": BOT_SECRET},
+                    json={"pending_id": self.pending_id},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as r:
+                    ok = r.status == 200
+        except Exception as e:
+            logger.warning(f"[BILL] {action} failed: {e}")
+        for item in self.children:
+            item.disabled = True
+        if ok:
+            txt = (
+                "✅ อนุมัติแล้ว ต่ออายุ 30 วัน ♡"
+                if approve
+                else "❌ ตีกลับสลิปนี้แล้ว"
+            )
+        else:
+            txt = "❌ ต่อ backend ไม่ได้ ลองใหม่นะ"
+        try:
+            await interaction.response.edit_message(content=txt, view=self)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="✅ อนุมัติ 30 วัน", style=discord.ButtonStyle.success)
+    async def approve_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._decide(interaction, True)
+
+    @discord.ui.button(label="❌ ตีกลับ", style=discord.ButtonStyle.danger)
+    async def deny_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._decide(interaction, False)
+
+
+async def _send_pending_slip(pending: dict):
+    """ส่งสลิปค้างตรวจเข้าห้องแอดมินพร้อมปุ่มอนุมัติ"""
+    if not ADMIN_CHANNEL_ID:
+        logger.warning("[BILL] no ADMIN_DISCORD_CHANNEL_ID — skip slip notify")
+        return False
+    channel = bot.get_channel(ADMIN_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(ADMIN_CHANNEL_ID)
+        except Exception as e:
+            logger.warning(f"[BILL] admin channel not found: {e}")
+            return False
+    guild_id = pending.get("guild_id", "?")
+    g = bot.get_guild(int(guild_id)) if str(guild_id).isdigit() else None
+    gname = g.name if g else pending.get("guild_name") or f"Guild {guild_id}"
+    img_bytes = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{DASHBOARD_URL}/internal/slip/{pending['pending_id']}",
+                headers={"X-Bot-Secret": BOT_SECRET},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status == 200:
+                    img_bytes = await r.read()
+    except Exception as e:
+        logger.warning(f"[BILL] slip download failed: {e}")
+
+    embed = discord.Embed(
+        title="🧾 สลิปใหม่รอตรวจ",
+        description=(
+            f"ดิส: **{gname}** (`{guild_id}`)\n"
+            f"ส่งเมื่อ: {pending.get('created_at', '?')}\n"
+            "กด ✅ = ต่ออายุ 30 วัน / ❌ = ตีกลับ"
+        ),
+        color=0xF5C518,
+    )
+    files = []
+    if img_bytes:
+        files.append(discord.File(io.BytesIO(img_bytes), filename="slip.png"))
+        embed.set_image(url="attachment://slip.png")
+    try:
+        await channel.send(
+            embed=embed,
+            files=files,
+            view=SlipApproveView(pending["pending_id"], int(guild_id))
+            if str(guild_id).isdigit()
+            else None,
         )
+    except Exception as e:
+        logger.warning(f"[BILL] admin send failed: {e}")
+        return False
+    # mark notified กันส่งซ้ำหลังรีสตาร์ท
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                f"{DASHBOARD_URL}/internal/pending/{pending['pending_id']}/notified",
+                headers={"X-Bot-Secret": BOT_SECRET},
+                timeout=aiohttp.ClientTimeout(total=5),
+            )
+    except Exception:
+        pass
+    return True
+
+
+async def _poll_billing():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{DASHBOARD_URL}/internal/pending",
+                    headers={"X-Bot-Secret": BOT_SECRET},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as r:
+                    if r.status == 200:
+                        for pending in (await r.json()).get("pending", []):
+                            await _send_pending_slip(pending)
+        except Exception:
+            pass
+        await asyncio.sleep(15)
+
+
+@tree.command(name="subscription", description="ดูสถานะแพ็กเกจของเซิร์ฟเวอร์นี้ ♡")
+async def subscription(interaction: discord.Interaction):
+    sub = await _sub_status(interaction.guild.id)
+    until = sub.get("paid_until")
+    if sub.get("paid"):
+        msg = f"✅ แพ็กเกจใช้งานได้ถึง **{until or '?'}** ♡"
+    else:
+        msg = _expired_msg(until)
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@tree.command(name="invite", description="ขอลิงก์เชิญบอทไปดิสอื่น ♡")
+async def invite(interaction: discord.Interaction):
     await interaction.response.send_message(
-        f"🖥️ รีเซ็ตลิงก์แล้ว ลิงก์เก่าใช้ไม่ได้แล้วนะ ♡\n{_dashboard_link(interaction.guild.id, key)}",
+        f"[🤖 เชิญไอแว่นเข้าดิสของคุณ]({invite_url()})\n"
+        "ติดตั้งแล้วสร้าง role `DJ` ให้คนที่คุมเพลงได้เลยนะ ♡ "
+        f"ดูแพ็กเกจที่ {PRICING_URL}",
         ephemeral=True,
     )
+
+
+@tree.command(name="billing-pending", description="ดูสลิปค้างตรวจอีกครั้ง (เจ้าของบอท) ♡")
+async def billing_pending(interaction: discord.Interaction):
+    if not _is_owner(interaction):
+        return await _deny(interaction, "˚⋆ เฉพาะเจ้าของบอทนะ ♡")
+    items = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{DASHBOARD_URL}/internal/pending",
+                headers={"X-Bot-Secret": BOT_SECRET},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                if r.status == 200:
+                    items = (await r.json()).get("pending", [])
+    except Exception:
+        pass
+    if not items:
+        return await interaction.response.send_message(
+            "✅ ไม่มีสลิปค้างตรวจ ♡", ephemeral=True
+        )
+    await interaction.response.send_message(
+        f"🧾 มี {len(items)} สลิปค้าง — กำลังส่งเข้าห้องแอดมินนะ", ephemeral=True
+    )
+    for pending in items:
+        await _send_pending_slip(pending)
 
 
 if __name__ == "__main__":
