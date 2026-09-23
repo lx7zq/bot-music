@@ -1046,10 +1046,23 @@ async def _play_next_guild(
 # ── Dashboard integration ──────────────────────────────────────────────────
 
 
-async def _push_state(guild: discord.Guild):
+def _state_payload(guild: discord.Guild) -> dict:
+    """payload สถานะรายดิส (แยกฟังก์ชัน sync เพื่อเทสได้)"""
     vc = guild.voice_client
     guild_id = guild.id
-    payload = {
+    try:
+        ping_ms = round(bot.latency * 1000)
+        if ping_ms != ping_ms:  # NaN guard (ยังไม่ต่อ gateway)
+            ping_ms = None
+    except Exception:
+        ping_ms = None
+    listeners = 0
+    if vc and getattr(vc, "channel", None):
+        try:
+            listeners = sum(1 for m in vc.channel.members if not getattr(m, "bot", False))
+        except Exception:
+            listeners = 0
+    return {
         "guild_id": str(guild_id),
         "guild_name": guild.name,
         "channel_name": vc.channel.name if vc and vc.channel else "",
@@ -1060,7 +1073,13 @@ async def _push_state(guild: discord.Guild):
         ),
         "now_playing": now_playing.get(guild_id),
         "queue": list(get_queue(guild_id)),
+        "listeners": listeners,
+        "ping_ms": ping_ms,
     }
+
+
+async def _push_state(guild: discord.Guild):
+    payload = _state_payload(guild)
     try:
         async with aiohttp.ClientSession() as session:
             await session.post(
