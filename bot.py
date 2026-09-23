@@ -650,21 +650,53 @@ class MoveChannelView(discord.ui.View):
             item.disabled = True
 
 
+# ระดับแผงปุ่ม: full (DJ) > green (คนในห้อง) > view (ดูอย่างเดียว)
+# หมายเหตุ: ปุ่มบนข้อความเดียวกันทุกคนเห็นเหมือนกัน — กรองรายคนได้เฉพาะ
+# ข้อความ ephemeral (เช่น /panel) ส่วนข้อความสาธารณะใช้ full + guard ตอนกด
+_LEVEL_RANK = {"view": 0, "green": 1, "full": 2}
+_BUTTON_MIN_LEVEL = {
+    "⏮": "green",
+    "⏸": "green",
+    "⏭": "green",
+    "⏹": "full",
+    "📋": "view",
+    "🖥️": "view",
+}
+
+
+def control_level(interaction: discord.Interaction) -> str:
+    """คืน full/green/view ตามสิทธิ์คนกด — ใช้เลือกปุ่มที่จะโชว์"""
+    if has_dj(interaction):
+        return "full"
+    if _is_same_channel(interaction):
+        return "green"
+    return "view"
+
+
 class GuildPlayerView(discord.ui.View):
-    def __init__(self, guild: discord.Guild):
+    def __init__(self, guild: discord.Guild, mode: str = "full"):
         super().__init__(timeout=None)
         self.guild = guild
 
-        # ปุ่มลิงก์กดทีเดียวเปิดเว็บเลย (เช็ค role ไม่ได้ — เลยเป็นลิงก์ดูอย่างเดียว
-        # ดู+ขอเพลงได้ปกติ / DJ ขอลิงก์คุมเต็มผ่าน /dashboard)
-        self.add_item(
-            discord.ui.Button(
-                emoji="🖥️",
-                label="เปิด Dashboard",
-                style=discord.ButtonStyle.link,
-                url=_dashboard_link(guild.id, None),
-                row=1,
-            )
+        # กรองปุ่มตาม mode — คนไม่มีสิทธิ์จะไม่เห็นปุ่มนั้นเลย (ไม่ใช่แค่กดไม่ติด)
+        rank = _LEVEL_RANK.get(mode, 2)
+        for item in list(self.children):
+            need = _BUTTON_MIN_LEVEL.get(str(getattr(item, "emoji", "")), "full")
+            if _LEVEL_RANK[need] > rank:
+                self.remove_item(item)
+
+    @discord.ui.button(
+        emoji="🖥️", label="เปิด Dashboard", style=discord.ButtonStyle.primary, row=1
+    )
+    async def dashboard_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        # เช็ค role ตอนกด — DJ ได้ลิงก์แบบมี key (กดได้ทุกปุ่มบนเว็บ)
+        # คนอื่นได้ลิงก์ดูอย่างเดียว (เห็นปุ่มแต่กดไม่ติด ขอเพลงใช้ /play ปกติ)
+        dj = has_dj(interaction)
+        key = await _fetch_dashboard_key(self.guild.id) if dj else None
+        await interaction.response.send_message(
+            _dashboard_messages(self.guild.id, key, dj), ephemeral=True
         )
 
     @discord.ui.button(emoji="⏮", style=discord.ButtonStyle.secondary, row=0)
@@ -1457,7 +1489,29 @@ async def now_playing_cmd(interaction: discord.Interaction):
         embed=build_now_playing_embed(
             now_playing[guild_id], get_queue(guild_id), guild_id=guild_id
         ),
-        view=GuildPlayerView(interaction.guild),
+        view=GuildPlayerView(interaction.guild, mode=control_level(interaction)),
+    )
+
+
+@tree.command(name="panel", description="เปิดแผงควบคุมส่วนตัว (ปุ่มตามสิทธิ์ของเรา) ♡")
+async def panel(interaction: discord.Interaction):
+    """แผง ephemeral เห็นคนเดียว — DJ เห็นครบ / คนในห้องเห็นปุ่มเขียว / คนนอกเห็นแค่ดู+ขอเพลง"""
+    level = control_level(interaction)
+    guild_id = interaction.guild.id
+    if guild_id in now_playing:
+        embed = build_now_playing_embed(
+            now_playing[guild_id], get_queue(guild_id), guild_id=guild_id
+        )
+    else:
+        embed = discord.Embed(
+            title="⋆˚𐙚 แผงควบคุม 𐙚˚⋆",
+            description="ยังไม่มีเพลงเล่นอยู่ — พิมพ์ `/play ชื่อเพลง` ในห้องเสียงได้เลย ♡",
+            color=0x5865F2,
+        )
+    await interaction.response.send_message(
+        embed=embed,
+        view=GuildPlayerView(interaction.guild, mode=level),
+        ephemeral=True,
     )
 
 
