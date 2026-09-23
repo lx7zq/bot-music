@@ -170,6 +170,85 @@ except ImportError:
 
 TOKEN = os.environ.get("TOKEN")
 
+# ── DJ role & dashboard keys ───────────────────────────────────────────────
+# ไม่ต้อง login หน้าเว็บ — เช็ค role ตอนกดในดิส (ephemeral) แล้วแจกลิงก์ ?key= ให้
+DJ_ROLE_NAME = os.environ.get("DJ_ROLE_NAME", "DJ").lower()
+BOT_SECRET = os.environ.get("BOT_SECRET", "change-me-in-prod")
+
+
+def is_admin(interaction: discord.Interaction) -> bool:
+    """เจ้าของดิส / MANAGE_GUILD / ADMINISTRATOR — ไม่มีวันโดนล็อกเอง"""
+    if not interaction.guild:
+        return False
+    user = interaction.user
+    if user.id == interaction.guild.owner_id:
+        return True
+    perms = getattr(user, "guild_permissions", None)
+    if perms is not None and (perms.administrator or perms.manage_guild):
+        return True
+    return False
+
+
+def has_dj(interaction: discord.Interaction) -> bool:
+    """แอดมินผ่านอัตโนมัติ / นอกนั้นต้องมี role ชื่อ DJ"""
+    if is_admin(interaction):
+        return True
+    roles = getattr(interaction.user, "roles", []) or []
+    return any((getattr(r, "name", "") or "").lower() == DJ_ROLE_NAME for r in roles)
+
+
+def _can_control(interaction: discord.Interaction) -> bool:
+    """ปุ่มเขียว: DJ หรือคนในห้องเสียงเดียวกับบอท"""
+    return has_dj(interaction) or _is_same_channel(interaction)
+
+
+async def _deny(
+    interaction: discord.Interaction,
+    msg: str = "˚⋆ ต้องมี role DJ หรืออยู่ในห้องเสียงเดียวกับบอทนะ ♡",
+):
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
+
+
+async def _fetch_dashboard_key(guild_id: int) -> str | None:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{DASHBOARD_URL}/internal/key/{guild_id}",
+                headers={"X-Bot-Secret": BOT_SECRET},
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as r:
+                if r.status == 200:
+                    return (await r.json()).get("key")
+    except Exception as e:
+        logger.warning(f"[DASH] key fetch failed: {e}")
+    return None
+
+
+async def _rotate_dashboard_key(guild_id: int) -> str | None:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{DASHBOARD_URL}/internal/rotate/{guild_id}",
+                headers={"X-Bot-Secret": BOT_SECRET},
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as r:
+                if r.status == 200:
+                    return (await r.json()).get("key")
+    except Exception as e:
+        logger.warning(f"[DASH] key rotate failed: {e}")
+    return None
+
+
+def _dashboard_link(guild_id: int, key: str | None) -> str:
+    base = f"{DASHBOARD_PUBLIC_URL}/guild/{guild_id}"
+    return f"{base}?key={key}" if key else base
+
 YDL_SEARCH = {
     "format": "worstaudio/bestaudio[abr<=64]/bestaudio",
     "quiet": True,
@@ -513,21 +592,32 @@ class GuildPlayerView(discord.ui.View):
         super().__init__(timeout=None)
         self.guild = guild
 
-        # ── Link button — row=1, Discord เปิด URL เองโดยไม่ต้องมี callback ──
-        self.add_item(
-            discord.ui.Button(
-                emoji="🖥️",
-                label="เปิด Dashboard",
-                style=discord.ButtonStyle.link,
-                url=f"{DASHBOARD_PUBLIC_URL}/guild/{guild.id}",
-                row=1,
+    @discord.ui.button(
+        emoji="🖥️", label="เปิด Dashboard", style=discord.ButtonStyle.primary, row=1
+    )
+    async def dashboard_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        # เช็ค role ตอนกด — DJ ได้ลิงก์แบบมี key (กดได้ทุกปุ่มบนเว็บ)
+        # คนอื่นได้ลิงก์ดูอย่างเดียว (เห็นปุ่มแต่กดไม่ติด ขอเพลงใช้ /play ปกติ)
+        dj = has_dj(interaction)
+        key = await _fetch_dashboard_key(self.guild.id) if dj else None
+        link = _dashboard_link(self.guild.id, key)
+        if dj:
+            msg = f"🖥️ ลิงก์ Dashboard (DJ) — อย่าส่งต่อนะ ♡\n{link}"
+        else:
+            msg = (
+                "🖥️ เปิดดูได้เลยนะ ♡ ปุ่มคุมเป็นของ DJ — "
+                f"อยากขอเพลงใช้ `/play` ในห้องได้ปกติ\n{link}"
             )
-        )
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(emoji="⏮", style=discord.ButtonStyle.secondary, row=0)
     async def prev_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        if not _can_control(interaction):
+            return await _deny(interaction)
         vc = self.guild.voice_client
         if not vc or not vc.is_playing():
             return await interaction.response.send_message(
@@ -545,6 +635,8 @@ class GuildPlayerView(discord.ui.View):
     async def pause_resume(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        if not _can_control(interaction):
+            return await _deny(interaction)
         vc = self.guild.voice_client
         if not vc:
             return await interaction.response.send_message(
@@ -567,6 +659,8 @@ class GuildPlayerView(discord.ui.View):
     async def skip_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        if not _can_control(interaction):
+            return await _deny(interaction)
         vc = self.guild.voice_client
         if not vc or (not vc.is_playing() and not vc.is_paused()):
             return await interaction.response.send_message(
@@ -614,6 +708,8 @@ class GuildPlayerView(discord.ui.View):
     async def stop_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        if not has_dj(interaction):
+            return await _deny(interaction, "˚⋆ ปุ่มนี้เฉพาะ DJ นะ ♡")
         guild_id = self.guild.id
         queues[guild_id] = deque()
         now_playing.pop(guild_id, None)
@@ -676,6 +772,11 @@ class SearchView(discord.ui.View):
             if interaction.user != self.interaction.user:
                 return await interaction.response.send_message(
                     "˚⋆ ไม่ใช่คนค้นหาอะ ♡", ephemeral=True
+                )
+            # ขอเพลง = คนในห้องเสียงหรือ DJ (กันคนนอกห้องยัดเพลง)
+            if not has_dj(interaction) and not _is_same_channel(interaction):
+                return await interaction.response.send_message(
+                    "˚⋆ เข้าห้องเสียงเดียวกับบอทก่อนนะ ♡", ephemeral=True
                 )
             song = dict(self.results[index])
             song["requester"] = interaction.user.display_name
@@ -797,9 +898,13 @@ async def _play_next_guild(
     except Exception as e:
         logger.warning(f"[PLAY] ❌ download error: {e}")
         if announce_channel:
-            await announce_channel.send(
-                f"❌ โหลดเพลง **{song['title']}** ไม่ได้ ข้ามไปเพลงถัดไป..."
-            )
+            try:
+                await announce_channel.send(
+                    f"❌ โหลดเพลง **{song['title']}** ไม่ได้ ข้ามไปเพลงถัดไป...",
+                    delete_after=5,
+                )
+            except Exception:
+                pass
         return await _play_next_guild(
             guild, announce_channel=announce_channel, announce=announce
         )
@@ -810,7 +915,10 @@ async def _play_next_guild(
     except Exception as e:
         logger.warning(f"[PLAY] ❌ FFmpegPCMAudio error: {e}")
         if announce_channel:
-            await announce_channel.send(f"❌ FFmpeg error: {e}")
+            try:
+                await announce_channel.send(f"❌ FFmpeg error: {e}", delete_after=5)
+            except Exception:
+                pass
         return None
 
     def after_play(error):
@@ -1148,6 +1256,8 @@ async def search(interaction: discord.Interaction, query: str):
 
 @tree.command(name="pause", description="หยุดเพลงชั่วคราว ♡")
 async def pause(interaction: discord.Interaction):
+    if not _can_control(interaction):
+        return await _deny(interaction)
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
         vc.pause()
@@ -1162,6 +1272,8 @@ async def pause(interaction: discord.Interaction):
 
 @tree.command(name="resume", description="เล่นเพลงต่อ ♡")
 async def resume(interaction: discord.Interaction):
+    if not _can_control(interaction):
+        return await _deny(interaction)
     vc = interaction.guild.voice_client
     if vc and vc.is_paused():
         vc.resume()
@@ -1174,6 +1286,8 @@ async def resume(interaction: discord.Interaction):
 
 @tree.command(name="skip", description="ข้ามเพลง (Vote skip ถ้ามีคนหลายคน) ♡")
 async def skip(interaction: discord.Interaction):
+    if not _can_control(interaction):
+        return await _deny(interaction)
     await interaction.response.defer()
     vc = interaction.guild.voice_client
     if not vc or (not vc.is_playing() and not vc.is_paused()):
@@ -1215,6 +1329,8 @@ async def skip(interaction: discord.Interaction):
 
 @tree.command(name="stop", description="หยุดเพลงและล้าง Queue ♡")
 async def stop(interaction: discord.Interaction):
+    if not has_dj(interaction):
+        return await _deny(interaction, "˚⋆ ปุ่มนี้เฉพาะ DJ นะ ♡")
     guild_id = interaction.guild.id
     queues[guild_id] = deque()
     now_playing.pop(guild_id, None)
@@ -1282,12 +1398,16 @@ async def now_playing_cmd(interaction: discord.Interaction):
 
 @tree.command(name="clear", description="ล้าง Queue ทั้งหมด ♡")
 async def clear_queue(interaction: discord.Interaction):
+    if not has_dj(interaction):
+        return await _deny(interaction, "˚⋆ ปุ่มนี้เฉพาะ DJ นะ ♡")
     queues[interaction.guild.id] = deque()
     await interaction.response.send_message("𐙚˚⋆ ล้าง Queue แล้วนะ ♡", ephemeral=True)
 
 
 @tree.command(name="leave", description="ไล่บอทออกจาก Voice Channel ♡")
 async def leave(interaction: discord.Interaction):
+    if not has_dj(interaction):
+        return await _deny(interaction, "˚⋆ ปุ่มนี้เฉพาะ DJ นะ ♡")
     vc = interaction.guild.voice_client
     if vc:
         _cancel_idle_timer(interaction.guild.id)
@@ -1307,6 +1427,8 @@ async def leave(interaction: discord.Interaction):
 @tree.command(name="volume", description="ปรับระดับเสียง 0-100 ♡")
 @app_commands.describe(vol="ระดับเสียง (0-100)")
 async def volume(interaction: discord.Interaction, vol: int):
+    if not has_dj(interaction):
+        return await _deny(interaction, "˚⋆ ปุ่มนี้เฉพาะ DJ นะ ♡")
     vc = interaction.guild.voice_client
     if not vc or not vc.is_playing():
         return await interaction.response.send_message(
@@ -1325,6 +1447,36 @@ async def volume(interaction: discord.Interaction, vol: int):
         await interaction.response.send_message(
             "˚⋆ ปรับเสียงในโหมดนี้ไม่ได้นะ ♡", ephemeral=True
         )
+
+
+@tree.command(name="dashboard", description="ขอลิงก์ Dashboard ของเซิร์ฟเวอร์นี้ ♡")
+async def dashboard(interaction: discord.Interaction):
+    dj = has_dj(interaction)
+    key = await _fetch_dashboard_key(interaction.guild.id) if dj else None
+    link = _dashboard_link(interaction.guild.id, key)
+    if dj:
+        msg = f"🖥️ ลิงก์ Dashboard (DJ) — อย่าส่งต่อนะ ♡\n{link}"
+    else:
+        msg = (
+            "🖥️ เปิดดูได้เลยนะ ♡ ปุ่มคุมเป็นของ DJ — "
+            f"อยากขอเพลงใช้ `/play` ในห้องได้ปกติ\n{link}"
+        )
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@tree.command(name="dashboard-key", description="รีเซ็ตลิงก์ Dashboard (แอดมินเท่านั้น) ♡")
+async def dashboard_key(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await _deny(interaction, "˚⋆ เฉพาะแอดมินดิสเท่านั้นนะ ♡")
+    key = await _rotate_dashboard_key(interaction.guild.id)
+    if not key:
+        return await interaction.response.send_message(
+            "❌ ต่อ backend ไม่ได้ ลองใหม่นะ", ephemeral=True
+        )
+    await interaction.response.send_message(
+        f"🖥️ รีเซ็ตลิงก์แล้ว ลิงก์เก่าใช้ไม่ได้แล้วนะ ♡\n{_dashboard_link(interaction.guild.id, key)}",
+        ephemeral=True,
+    )
 
 
 if __name__ == "__main__":
