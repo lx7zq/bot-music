@@ -182,7 +182,7 @@ OWNER_DISCORD_ID = int(os.environ.get("OWNER_DISCORD_ID", "0") or 0)
 GRACE_DAYS = int(os.environ.get("BILLING_GRACE_DAYS", "3") or 3)
 PRICING_URL = os.environ.get("PRICING_URL", f"{DASHBOARD_PUBLIC_URL}/pricing")
 INVITE_CLIENT_ID = os.environ.get("INVITE_CLIENT_ID", "1512172686254800986")
-INVITE_PERMS = int(os.environ.get("INVITE_PERMS", "36785152"))  # view+send+embed+history+connect+speak+VAD
+INVITE_PERMS = int(os.environ.get("INVITE_PERMS", "36785168"))  # view+send+embed+history+connect+speak+VAD+manage-channels
 
 
 def invite_url() -> str:
@@ -1807,6 +1807,147 @@ async def billing_pending(interaction: discord.Interaction):
     )
     for pending in items:
         await _send_pending_slip(pending)
+
+
+# ── Setup: ห้องบอท 3 โหมด ────────────────────────────────────────────────
+SETUP_ROOM_NAME = os.environ.get("SETUP_ROOM_NAME", "ไอแว่น-ขอเพลง")
+
+
+def _allow_all() -> discord.PermissionOverwrite:
+    return discord.PermissionOverwrite(
+        view_channel=True,
+        send_messages=True,
+        embed_links=True,
+        read_message_history=True,
+        add_reactions=True,
+        use_application_commands=True,
+    )
+
+
+def _staff_roles(guild) -> list:
+    """role ที่มี manage_guild/administrator — ได้สิทธิ์ห้องบอทเสมอ (กันแอดมินล็อกตัวเอง)"""
+    out = []
+    for r in getattr(guild, "roles", []) or []:
+        p = getattr(r, "permissions", None)
+        if p is not None and (p.administrator or p.manage_guild):
+            out.append(r)
+    return out
+
+
+def _dj_role(guild):
+    for r in getattr(guild, "roles", []) or []:
+        if (getattr(r, "name", "") or "").lower() == DJ_ROLE_NAME:
+            return r
+    return None
+
+
+def _setup_overwrites(guild, role=None, private: bool = False) -> dict:
+    """คืน overwrites ตามโหมด — public / role / private (private ชนะ role)"""
+    ow = {guild.me: _allow_all()}
+    for r in _staff_roles(guild):
+        ow[r] = _allow_all()
+    dj = _dj_role(guild)
+    if dj is not None:
+        ow[dj] = _allow_all()
+    if private:
+        ow[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+    elif role is not None:
+        # Allow ของ role ชนะ Deny ของ everyone → คนมี role เห็นห้อง คนเข้าใหม่ไม่เห็น
+        ow[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+        ow[role] = _allow_all()
+    else:
+        ow[guild.default_role] = _allow_all()
+    return ow
+
+
+def _setup_mode_text(role=None, private: bool = False) -> str:
+    if private:
+        return "เห็นเฉพาะ role DJ + แอดมิน"
+    if role is not None:
+        return f"เห็นเฉพาะ {role.mention} (คนเข้าใหม่ยังไม่เห็นจนกว่าจะรับยศ)"
+    return "ทุกคนเห็นห้องนี้"
+
+
+def _welcome_text() -> str:
+    return (
+        "สวัสดีทุกคน ♡ ไอแว่นหมี DJ มาประจำดิสนี้แล้ว\n\n"
+        "🎧 ลากบอทเข้าห้องเสียงแล้วพิมพ์ `/play ชื่อเพลง` ได้เลย\n"
+        "🎛️ สร้าง role ชื่อ `DJ` ให้คนที่คุมเพลงได้ (แอดมินได้สิทธิ์อัตโนมัติ)\n"
+        "🎁 ดิสใหม่ทดลองใช้ฟรี 30 วัน\n"
+        "🛠️ แอดมินอยากได้ห้องส่วนตัวให้บอท พิมพ์ `/setup` ได้เลย "
+        "(มีโหมดเฉพาะ role สมาชิก / เฉพาะ DJ ด้วยนะ)"
+    )
+
+
+@tree.command(name="setup", description="สร้าง/ซ่อมห้องบอท (แอดมินเท่านั้น) ♡")
+@app_commands.describe(
+    role="role สมาชิกที่ให้เห็นห้อง (เช่น @user) — คนไม่มี role นี้จะไม่เห็นห้อง",
+    private="True = ห้องลับ เห็นเฉพาะ DJ + แอดมิน",
+)
+async def setup_cmd(
+    interaction: discord.Interaction,
+    role: discord.Role | None = None,
+    private: bool = False,
+):
+    if not is_admin(interaction):
+        return await _deny(interaction, "˚⋆ เฉพาะแอดมินดิสเท่านั้นนะ ♡")
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    me_perms = getattr(guild.me, "guild_permissions", None)
+    if me_perms is None or not me_perms.manage_channels:
+        return await interaction.followup.send(
+            "❌ บอทไม่มีสิทธิ์ **Manage Channels** ในดิสนี้\n"
+            "เพิ่มสิทธิ์ให้ role บอทแล้วรัน `/setup` ใหม่นะ",
+            ephemeral=True,
+        )
+
+    channel = discord.utils.get(guild.text_channels, name=SETUP_ROOM_NAME)
+    ow = _setup_overwrites(guild, role, private)
+    try:
+        if channel:
+            await channel.edit(overwrites=ow, reason="ไอแว่น /setup")
+            acted = "ซ่อมสิทธิ์ห้อง"
+        else:
+            channel = await guild.create_text_channel(
+                SETUP_ROOM_NAME, overwrites=ow, reason="ไอแว่น /setup"
+            )
+            acted = "สร้างห้อง"
+            try:
+                await channel.send(_welcome_text())
+            except Exception:
+                pass
+    except discord.Forbidden:
+        return await interaction.followup.send(
+            "❌ สร้าง/แก้ห้องไม่สำเร็จ (สิทธิ์ไม่พอ) — เช็ค role บอทว่าสูงพอและมี Manage Channels นะ",
+            ephemeral=True,
+        )
+    except Exception as e:
+        logger.warning(f"[SETUP] failed: {e}")
+        return await interaction.followup.send(
+            "❌ เกิดข้อผิดพลาด ลองใหม่นะ", ephemeral=True
+        )
+    await interaction.followup.send(
+        f"✅ {acted} {channel.mention} แล้ว — {_setup_mode_text(role, private)} ♡",
+        ephemeral=True,
+    )
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    # sync คำสั่งรายดิสทันที (ไม่ต้องรอ global sync สูงสุด 1 ชม.)
+    try:
+        await tree.sync(guild=guild)
+        logger.warning(f"[JOIN] synced commands to {guild.name} ({guild.id})")
+    except Exception as e:
+        logger.warning(f"[JOIN] sync failed: {e}")
+    # Way 1: เข้าแบบเงียบ — ไม่สร้างห้องเอง แค่ทักทายใน system channel
+    try:
+        ch = guild.system_channel
+        if ch is not None and ch.permissions_for(guild.me).send_messages:
+            await ch.send(_welcome_text())
+    except Exception as e:
+        logger.warning(f"[JOIN] welcome failed: {e}")
 
 
 if __name__ == "__main__":
