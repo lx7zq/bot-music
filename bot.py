@@ -1868,6 +1868,10 @@ def _setup_mode_text(role=None, private: bool = False) -> str:
     return "ทุกคนเห็นห้องนี้"
 
 
+def _join_notice() -> str:
+    return f"✅ ไอแว่นเข้าประจำการแล้ว — วิธีใช้: {DASHBOARD_PUBLIC_URL}"
+
+
 def _welcome_text() -> str:
     return (
         "สวัสดีทุกคน ♡ ไอแว่นหมี DJ มาประจำดิสนี้แล้ว\n\n"
@@ -1941,11 +1945,11 @@ async def on_guild_join(guild: discord.Guild):
         logger.warning(f"[JOIN] synced commands to {guild.name} ({guild.id})")
     except Exception as e:
         logger.warning(f"[JOIN] sync failed: {e}")
-    # Way 1: เข้าแบบเงียบ — ไม่สร้างห้องเอง แค่ทักทายใน system channel
+    # Way 1: เข้าแบบเงียบ — ไม่สร้างห้องเอง เหลือบรรทัดเดียวชี้ไปวิธีใช้บนเว็บ
     try:
         ch = guild.system_channel
         if ch is not None and ch.permissions_for(guild.me).send_messages:
-            await ch.send(_welcome_text())
+            await ch.send(_join_notice())
     except Exception as e:
         logger.warning(f"[JOIN] welcome failed: {e}")
 
