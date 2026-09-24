@@ -1872,15 +1872,29 @@ def _join_notice() -> str:
     return f"✅ ไอแว่นเข้าประจำการแล้ว — วิธีใช้: {DASHBOARD_PUBLIC_URL}"
 
 
-def _welcome_text() -> str:
-    return (
-        "สวัสดีทุกคน ♡ ไอแว่นหมี DJ มาประจำดิสนี้แล้ว\n\n"
-        "🎧 ลากบอทเข้าห้องเสียงแล้วพิมพ์ `/play ชื่อเพลง` ได้เลย\n"
-        "🎛️ สร้าง role ชื่อ `DJ` ให้คนที่คุมเพลงได้ (แอดมินได้สิทธิ์อัตโนมัติ)\n"
-        "🎁 ดิสใหม่ทดลองใช้ฟรี 30 วัน\n"
-        "🛠️ แอดมินอยากได้ห้องส่วนตัวให้บอท พิมพ์ `/setup` ได้เลย "
-        "(มีโหมดเฉพาะ role สมาชิก / เฉพาะ DJ ด้วยนะ)"
+def _welcome_embed() -> discord.Embed:
+    """ข้อความต้อนรับในห้องบอท — แบบ embed อ่านง่ายกว่า wall of text"""
+    embed = discord.Embed(
+        title="ไอแว่น DJ เข้าประจำการแล้ว",
+        description=f"ทดลองใช้ฟรี 30 วัน ดูแพ็กเกจที่ {PRICING_URL}",
+        color=0x534AB7,
     )
+    embed.add_field(
+        name="1. เปิดเพลง",
+        value="ลากบอทเข้าห้องเสียง แล้วพิมพ์ `/play ชื่อเพลง`",
+        inline=False,
+    )
+    embed.add_field(
+        name="2. ตั้งคนคุมเพลง",
+        value="สร้าง role `DJ` ให้คนที่คุมได้ (แอดมินได้สิทธิ์อัตโนมัติ)",
+        inline=False,
+    )
+    embed.add_field(
+        name="3. ปรับห้องนี้",
+        value="พิมพ์ `/setup` เปลี่ยนได้ว่าใครเห็นห้องนี้ (ทุกคน / เฉพาะ role / เฉพาะ DJ)",
+        inline=False,
+    )
+    return embed
 
 
 @tree.command(name="setup", description="สร้าง/ซ่อมห้องบอท (แอดมินเท่านั้น) ♡")
@@ -1918,7 +1932,7 @@ async def setup_cmd(
             )
             acted = "สร้างห้อง"
             try:
-                await channel.send(_welcome_text())
+                await channel.send(embed=_welcome_embed())
             except Exception:
                 pass
     except discord.Forbidden:
