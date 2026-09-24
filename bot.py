@@ -222,7 +222,7 @@ async def _sub_status(guild_id: int) -> dict:
 def _expired_msg(paid_until) -> str:
     when = f" (หมดอายุ {paid_until})" if paid_until else ""
     return (
-        f"˚⋆ แพ็กเกจหมดอายุแล้ว{when} ♡ ต่ออายุ 99฿/เดือนที่ {PRICING_URL} "
+        f"˚⋆ แพ็กเกจหมดอายุแล้ว{when} ♡ ต่ออายุ 49฿/เดือนที่ {PRICING_URL} "
         f"แล้วส่งสลิปได้เลย (ใช้ต่อได้อีก {GRACE_DAYS} วันหลังหมดอายุนะ)"
     )
 
@@ -233,7 +233,7 @@ def _blocked_msg(sub: dict) -> str | None:
         return None
     if sub.get("trial_expired"):
         return (
-            "˚⋆ หมดช่วงทดลองใช้แล้ว ♡ ต่อแค่ 99฿/เดือนที่ "
+            "˚⋆ หมดช่วงทดลองใช้แล้ว ♡ ต่อแค่ 49฿/เดือนที่ "
             f"{PRICING_URL} ส่งสลิปหน้าเว็บได้เลย"
         )
     return _expired_msg(sub.get("paid_until"))
@@ -1762,7 +1762,7 @@ async def _poll_billing():
 async def subscription(interaction: discord.Interaction):
     sub = await _sub_status(interaction.guild.id)
     if sub.get("trial"):
-        msg = f"🎁 ช่วงทดลองใช้เหลืออีก **{sub.get('trial_left', '?')} วัน** ♡ ถูกใจค่อยต่อ 99฿/เดือนที่ {PRICING_URL}"
+        msg = f"🎁 ช่วงทดลองใช้เหลืออีก **{sub.get('trial_left', '?')} วัน** ♡ ถูกใจค่อยต่อ 49฿/เดือนที่ {PRICING_URL}"
     elif sub.get("paid"):
         msg = f"✅ แพ็กเกจใช้งานได้ถึง **{sub.get('paid_until') or '?'}** ♡"
     elif sub.get("in_grace"):
